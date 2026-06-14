@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>乘风2026 · 实时投票监控</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,'Helvetica Neue','Microsoft Yahei',Arial,sans-serif;background:#0a0a1a;color:#e0e0e0;min-height:100vh}
+.header{background:linear-gradient(135deg,#1a0a2e 0%,#16213e 50%,#0a1a3a 100%);padding:28px 20px;text-align:center;border-bottom:2px solid #ff6b9d}
+.header h1{font-size:2em;background:linear-gradient(135deg,#ff6b9d,#c44dff,#6bc5ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:8px}
+.header .subtitle{color:#8890b0;font-size:.9em}
+.controls{display:flex;flex-wrap:wrap;gap:10px;padding:12px 16px;background:#111130;border-bottom:1px solid #2a2a50;align-items:center;justify-content:center;position:sticky;top:0;z-index:100}
+.controls label{color:#8890b0;font-size:.85em}
+.controls select{background:#1a1a40;color:#e0e0e0;border:1px solid #3a3a60;padding:7px 10px;border-radius:6px;font-size:.85em;min-width:110px}
+.controls button{cursor:pointer;border:none;padding:8px 16px;border-radius:6px;font-size:.85em;font-weight:600;transition:opacity .2s}
+.controls button:hover{opacity:.85}
+.btn-refresh{background:linear-gradient(135deg,#00c853,#00bfa5);color:#fff;font-size:.95em;padding:9px 20px}
+.btn-secondary{background:#2a2a50;color:#c0c0e0;font-size:.8em}
+.status{padding:5px 10px;border-radius:10px;font-size:.8em;font-weight:600}
+.status.online{background:#00c85330;color:#00c853}
+.status.error{background:#ff444430;color:#ff4444}
+.status.loading{background:#ffa00030;color:#ffa000}
+.chart-container{margin:16px;background:#111130;border-radius:12px;padding:18px;border:1px solid #2a2a50}
+.chart-container h2{font-size:1.3em;margin-bottom:12px;color:#c0c0e0;display:flex;align-items:center;gap:8px}
+.chart-container h2 .badge{font-size:.55em;background:#ff6b9d;color:#fff;padding:3px 8px;border-radius:10px}
+.chart-wrapper{position:relative;width:100%;height:500px}
+.chart-wrapper.large{height:600px}
+.summary-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px;margin:16px}
+.card{background:#111130;border:1px solid #2a2a50;border-radius:10px;padding:12px;text-align:center;transition:border-color .3s;cursor:pointer}
+.card:hover{border-color:#ff6b9d}
+.card .rank{font-size:.7em;color:#555;margin-bottom:2px}
+.card .name{font-size:1em;font-weight:700;margin-bottom:3px}
+.card .votes{font-size:1.3em;font-weight:700;color:#ff6b9d}
+.card .inc{font-size:.8em;color:#4BC0C0;margin-top:2px}
+.card .inc.zero{color:#555}
+.card .song{font-size:.75em;color:#555;margin-top:2px}
+.footer{text-align:center;padding:18px;color:#555;font-size:.8em}
+.footer a{color:#4BC0C0}
+#lastUpdate{color:#4BC0C0}
+.hidden{display:none!important}
+.toast{position:fixed;bottom:30px;left:50%;transform:translateX(-50%);background:#333;color:#fff;padding:10px 24px;border-radius:20px;font-size:.85em;z-index:9999;opacity:0;transition:opacity .3s}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🌊 乘风2026 · 实时投票数据监控</h1>
+  <p class="subtitle">数据来源: lego.mgtv.com · 每5分钟自动更新 · 最后更新: <span id="lastUpdate">加载中...</span></p>
+</div>
+
+<div class="controls">
+  <button class="btn-refresh" onclick="loadData()" id="btnRefresh">🔄 刷新数据</button>
+  <span class="status loading" id="statusBadge">● 加载中</span>
+  <label>📊 视图:</label>
+  <select id="chartMode" onchange="switchMode()">
+    <option value="total" selected>总票数走势 (夯爆了)</option>
+    <option value="increment">每分钟票数增量</option>
+    <option value="both">总票数 + 增量</option>
+    <option value="single">单选手详细视图</option>
+  </select>
+  <label>👤 选手:</label>
+  <select id="contestantSelect" onchange="switchMode()">
+    <option value="all">全部选手</option>
+  </select>
+  <button class="btn-secondary" onclick="window.location.reload()">🔃 刷新页面</button>
+</div>
+
+<div id="summaryCards" class="summary-cards"></div>
+
+<div id="totalChartContainer" class="chart-container">
+  <h2>📈 总票数走势 <span class="badge">夯爆了</span></h2>
+  <div class="chart-wrapper large"><canvas id="totalChart"></canvas></div>
+</div>
+
+<div id="incrementChartContainer" class="chart-container hidden">
+  <h2>⚡ 每次更新票数增量</h2>
+  <div class="chart-wrapper large"><canvas id="incrementChart"></canvas></div>
+</div>
+
+<div id="singleChartContainer" class="chart-container hidden">
+  <h2>🔍 单选手详细视图</h2>
+  <div class="chart-wrapper large"><canvas id="singleChart"></canvas></div>
+  <div class="chart-wrapper" style="height:320px;margin-top:16px"><canvas id="singleIncChart"></canvas></div>
+</div>
+
+<div class="footer">
+  <p>📡 数据由 GitHub Action 每5分钟自动采集 | 🧑‍💻 <a href="https://github.com/iceicea/cf2026" target="_blank">GitHub 仓库</a></p>
+  <p>总票数 = 夯爆了选项票数 | 增量 = 当前更新 - 上一次更新</p>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+const COLORS = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#C9CBCF','#7BC8A4',
+  '#E8A87C','#FF6F61','#6B5B95','#88B04B','#F7CAC9','#92A8D1','#955251','#B565A7','#009B77',
+  '#DD4124','#D65076','#45B8AC','#EFC050','#5B5EA6','#9B2335','#DFCFBE','#55B4B0'];
+
+let allData = null, totalChart = null, incrementChart = null;
+let singleChart = null, singleIncChart = null;
+
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  clearTimeout(t._tid); t._tid = setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+function processData(history) {
+  const timestamps = history.timestamps || [];
+  const contestants = history.contestants || {};
+  const timeLabels = timestamps.map(ts => {
+    const d = new Date(ts * 1000);
+    return (d.getMonth()+1).toString().padStart(2,'0')+'/'
+         + d.getDate().toString().padStart(2,'0')+' '
+         + d.getHours().toString().padStart(2,'0')+':'
+         + d.getMinutes().toString().padStart(2,'0');
+  });
+  const latestVals = {};
+  for (const [name, rec] of Object.entries(contestants)) {
+    const ha = rec['夯爆了'] || [];
+    if (ha.length > 0) latestVals[name] = ha[ha.length - 1];
+  }
+  const sortedNames = Object.keys(latestVals).sort((a,b) => latestVals[b] - latestVals[a]);
+  const dsT = [], dsI = [];
+  sortedNames.forEach((name, idx) => {
+    const rec = contestants[name];
+    const haVals = rec['夯爆了'] || [];
+    const color = COLORS[idx % COLORS.length];
+    const increments = [null];
+    for (let i = 1; i < haVals.length; i++) increments.push(Math.max(0, haVals[i] - haVals[i-1]));
+    dsT.push({ name, song: rec.song || '', color, data: haVals });
+    dsI.push({ name, song: rec.song || '', color, data: increments });
+  });
+  return { timeLabels, sortedNames, datasetsTotal: dsT, datasetsInc: dsI };
+}
+
+function renderSummaryCards(sortedNames, dsT, dsI) {
+  document.getElementById('summaryCards').innerHTML = sortedNames.map((name, i) => {
+    const d = dsT[i], di = dsI[i];
+    const lastVal = d.data.length ? d.data[d.data.length-1] : 0;
+    const lastInc = di.data.length > 1 ? di.data[di.data.length-1] : null;
+    const incStr = lastInc != null ? '+' + lastInc.toLocaleString() : '-';
+    const incCls = lastInc > 0 ? '' : 'zero';
+    return `<div class="card" style="border-left:3px solid ${d.color}" onclick="focusContestant('${name.replace(/'/g,"\\'")}')">
+      <div class="rank">#${i+1}</div><div class="name">${name}</div>
+      <div class="votes">${lastVal.toLocaleString()}</div>
+      <div class="inc ${incCls}">${incStr}</div>
+      <div class="song">${d.song}</div></div>`;
+  }).join('');
+}
+
+function fillSelect(sortedNames) {
+  const sel = document.getElementById('contestantSelect');
+  sel.innerHTML = '<option value="all">全部选手</option>'
+    + sortedNames.map((n,i) => `<option value="${n}">${n} (#${i+1})</option>`).join('');
+}
+
+function createTotalChart(timeLabels, dsT) {
+  if (totalChart) totalChart.destroy();
+  const ctx = document.getElementById('totalChart').getContext('2d');
+  totalChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: timeLabels,
+      datasets: dsT.map((d,i) => ({
+        label: d.name, data: d.data, borderColor: d.color,
+        backgroundColor: d.color+'20', borderWidth: i===0?3:1.5,
+        tension: 0.3, pointRadius: 1, pointHoverRadius: 5, fill: false
+      }))
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'right', labels: { color:'#c0c0e0', font:{size:11}, boxWidth:15, padding:6 } },
+        tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y.toLocaleString() + ' 票' } }
+      },
+      scales: {
+        x: { ticks: { color:'#666',maxTicksLimit:20,maxRotation:45 }, grid:{ color:'#1a1a40' } },
+        y: { ticks: { color:'#666',callback:v=>v>=10000?(v/10000).toFixed(1)+'万':v.toLocaleString() }, grid:{ color:'#1a1a40' } }
+      }
+    }
+  });
+}
+
+function createIncrementChart(timeLabels, dsI) {
+  if (incrementChart) incrementChart.destroy();
+  const ctx = document.getElementById('incrementChart').getContext('2d');
+  incrementChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: timeLabels,
+      datasets: dsI.map((d,i) => ({
+        label: d.name, data: d.data,
+        backgroundColor: d.color+'80', borderColor: d.color, borderWidth: i===0?2.5:1.2
+      }))
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'right', labels: { color:'#c0c0e0', font:{size:11}, boxWidth:15, padding:6 } },
+        tooltip: { callbacks: { label: c => c.dataset.label + ': +' + c.parsed.y.toLocaleString() + ' 票' } }
+      },
+      scales: {
+        x: { ticks: { color:'#666',maxTicksLimit:20,maxRotation:45 }, grid:{ color:'#1a1a40' } },
+        y: { ticks: { color:'#666',callback:v=>v>=10000?(v/10000).toFixed(1)+'万':v.toLocaleString() }, grid:{ color:'#1a1a40' } }
+      }
+    }
+  });
+}
+
+function createSingleCharts(name, timeLabels, dsT, dsI) {
+  const idx = dsT.findIndex(d => d.name === name);
+  if (idx < 0) return;
+  const d = dsT[idx], di = dsI[idx];
+  if (singleChart) singleChart.destroy();
+  const ctx1 = document.getElementById('singleChart').getContext('2d');
+  singleChart = new Chart(ctx1, {
+    type: 'line',
+    data: { labels: timeLabels,
+      datasets: [{ label: d.name+' 总票数', data: d.data, borderColor: d.color,
+        backgroundColor: d.color+'30', borderWidth:2.5, tension:0.3,
+        pointRadius:2, pointHoverRadius:6, fill:true }]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: c => '总票数: '+c.parsed.y.toLocaleString()+' 票' } } },
+      scales:{ x:{ ticks:{ color:'#666',maxTicksLimit:20,maxRotation:45 }, grid:{ color:'#1a1a40' } },
+        y:{ ticks:{ color:'#666',callback:v=>v>=10000?(v/10000).toFixed(1)+'万':v.toLocaleString() }, grid:{ color:'#1a1a40' } } }
+    }
+  });
+  if (singleIncChart) singleIncChart.destroy();
+  const ctx2 = document.getElementById('singleIncChart').getContext('2d');
+  singleIncChart = new Chart(ctx2, {
+    type: 'bar',
+    data: { labels: timeLabels,
+      datasets: [{ label: d.name+' 增量', data: di.data,
+        backgroundColor: d.color+'80', borderColor: d.color, borderWidth:1 }]
+    },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: c => '增量: +'+c.parsed.y.toLocaleString()+' 票' } } },
+      scales:{ x:{ ticks:{ color:'#666',maxTicksLimit:20,maxRotation:45 }, grid:{ color:'#1a1a40' } },
+        y:{ ticks:{ color:'#666',callback:v=>v>=10000?(v/10000).toFixed(1)+'万':v.toLocaleString() }, grid:{ color:'#1a1a40' } } }
+    }
+  });
+}
+
+function switchMode() {
+  if (!allData) return;
+  const { timeLabels, sortedNames, datasetsTotal:dsT, datasetsInc:dsI } = allData;
+  const mode = document.getElementById('chartMode').value;
+  const selected = document.getElementById('contestantSelect').value;
+  document.getElementById('totalChartContainer').classList.add('hidden');
+  document.getElementById('incrementChartContainer').classList.add('hidden');
+  document.getElementById('singleChartContainer').classList.add('hidden');
+  if (mode === 'total') {
+    document.getElementById('totalChartContainer').classList.remove('hidden');
+    createTotalChart(timeLabels, dsT);
+  } else if (mode === 'increment') {
+    document.getElementById('incrementChartContainer').classList.remove('hidden');
+    createIncrementChart(timeLabels, dsI);
+  } else if (mode === 'both') {
+    document.getElementById('totalChartContainer').classList.remove('hidden');
+    document.getElementById('incrementChartContainer').classList.remove('hidden');
+    createTotalChart(timeLabels, dsT);
+    createIncrementChart(timeLabels, dsI);
+  } else if (mode === 'single') {
+    document.getElementById('singleChartContainer').classList.remove('hidden');
+    createSingleCharts(selected === 'all' ? sortedNames[0] : selected, timeLabels, dsT, dsI);
+  }
+}
+
+function focusContestant(name) {
+  document.getElementById('chartMode').value = 'single';
+  document.getElementById('contestantSelect').value = name;
+  switchMode();
+  document.getElementById('singleChartContainer').scrollIntoView({ behavior:'smooth' });
+}
+
+async function loadData() {
+  const badge = document.getElementById('statusBadge');
+  badge.className = 'status loading'; badge.textContent = '● 加载中';
+  try {
+    const resp = await fetch('data.json?t=' + Date.now());
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const history = await resp.json();
+    if (!history.timestamps || history.timestamps.length === 0) {
+      badge.className = 'status error'; badge.textContent = '● 暂无数据';
+      document.getElementById('lastUpdate').textContent = '等待首次数据采集...';
+      return;
+    }
+    allData = processData(history);
+    const { sortedNames, datasetsTotal:dsT, datasetsInc:dsI } = allData;
+    fillSelect(sortedNames);
+    renderSummaryCards(sortedNames, dsT, dsI);
+    switchMode();
+    const lastTs = history.timestamps[history.timestamps.length-1];
+    document.getElementById('lastUpdate').textContent = new Date(lastTs*1000).toLocaleString('zh-CN');
+    badge.className = 'status online';
+    badge.textContent = '● 在线 (' + history.timestamps.length + ' 点)';
+    document.getElementById('btnRefresh').textContent = '🔄 刷新数据';
+  } catch(e) {
+    console.error(e);
+    badge.className = 'status error'; badge.textContent = '● 加载失败';
+    document.getElementById('btnRefresh').textContent = '🔄 重试';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadData();
+  setInterval(loadData, 60000);
+});
+</script>
+</body>
+</html>
