@@ -22,9 +22,9 @@ body{font-family:-apple-system,'Helvetica Neue','Microsoft Yahei',Arial,sans-ser
 .btn-secondary{background:#2a2a50;color:#c0c0e0;font-size:.8em}
 .status{padding:5px 10px;border-radius:10px;font-size:.8em;font-weight:600}
 .status.online{background:#00c85330;color:#00c853}
-.status.live{background:#ff6b9d30;color:#ff6b9d}
 .status.error{background:#ff444430;color:#ff4444}
 .status.loading{background:#ffa00030;color:#ffa000}
+.status.pending{background:#ff6b9d30;color:#ff6b9d}
 .countdown{color:#8890b0;font-size:.8em}
 .chart-container{margin:16px;background:#111130;border-radius:12px;padding:18px;border:1px solid #2a2a50}
 .chart-container h2{font-size:1.3em;margin-bottom:12px;color:#c0c0e0;display:flex;align-items:center;gap:8px}
@@ -53,11 +53,11 @@ body{font-family:-apple-system,'Helvetica Neue','Microsoft Yahei',Arial,sans-ser
 
 <div class="header">
   <h1>🌊 乘风2026 · 实时投票数据监控</h1>
-  <p class="subtitle">数据来源: 芒果TV API · 每60秒自动刷新 · 最后更新: <span id="lastUpdate">加载中...</span></p>
+  <p class="subtitle">数据来源: 芒果TV API · 自动更新: ~60秒 · 最后更新: <span id="lastUpdate">加载中...</span></p>
 </div>
 
 <div class="controls">
-  <button class="btn-refresh" onclick="manualRefresh()" id="btnRefresh">🔄 实时刷新（调芒果TV接口）</button>
+  <button class="btn-refresh" onclick="manualRefresh()" id="btnRefresh">🔄 手动刷新（调芒果TV接口）</button>
   <span class="status loading" id="statusBadge">● 加载中</span>
   <label>📊 视图:</label>
   <select id="chartMode" onchange="switchMode()">
@@ -71,7 +71,7 @@ body{font-family:-apple-system,'Helvetica Neue','Microsoft Yahei',Arial,sans-ser
     <option value="all">全部选手</option>
   </select>
   <button class="btn-secondary" onclick="window.location.reload()">🔃 刷新页面</button>
-  <span class="countdown" id="countdown">下次刷新: 60秒</span>
+  <span class="countdown" id="countdown">下次自动刷新: 60秒</span>
 </div>
 
 <div id="summaryCards" class="summary-cards"></div>
@@ -93,18 +93,13 @@ body{font-family:-apple-system,'Helvetica Neue','Microsoft Yahei',Arial,sans-ser
 </div>
 
 <div class="footer">
-  <p>📡 点击「实时刷新」直接调芒果TV接口 | 每60秒自动刷新 | 🧑‍💻 <a href="https://github.com/iceicea/cf2026" target="_blank">GitHub 仓库</a></p>
+  <p>📡 点击「手动刷新」→ 触发 GitHub Action 服务端调芒果TV API → 轮询最新数据 | 🧑‍💻 <a href="https://github.com/iceicea/cf2026" target="_blank">GitHub 仓库</a></p>
   <p>总票数 = 夯爆了选项票数 | 增量 = 当前更新 - 上一次更新</p>
 </div>
 
 <div id="toast" class="toast"></div>
 
 <script>
-// ===== CORS 代理地址 =====
-// Cloudflare Worker 代理（如浏览器无法访问则回退到 data.json）
-const PROXY_URL = 'https://cf2026-proxy.wshiizhilh123.workers.dev/?url=';
-const API_BASE = 'https://vote.api.mgtv.com/chengfeng/query_vote_list';
-
 const COLORS = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#C9CBCF','#7BC8A4',
   '#E8A87C','#FF6F61','#6B5B95','#88B04B','#F7CAC9','#92A8D1','#955251','#B565A7','#009B77',
   '#DD4124','#D65076','#45B8AC','#EFC050','#5B5EA6','#9B2335','#DFCFBE','#55B4B0'];
@@ -112,107 +107,13 @@ const COLORS = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#C9
 let allData = null, totalChart = null, incrementChart = null;
 let singleChart = null, singleIncChart = null;
 let autoRefreshTimer = null, countdownTimer = null, countdown = 60;
-let historyStore = null; // localStorage 中的数据
 
-// ===== localStorage 持久化 =====
-const STORAGE_KEY = 'cf2026_history';
-
-function loadLocalHistory() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : { timestamps: [], contestants: {} };
-  } catch(e) { return { timestamps: [], contestants: {} }; }
-}
-
-function saveLocalHistory(h) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(h)); } catch(e) {}
-}
-
-// 合并两个 history（以 data.json 为准，补充本地数据）
-function mergeHistory(serverHistory) {
-  const local = loadLocalHistory();
-  if (!serverHistory.timestamps || serverHistory.timestamps.length === 0) {
-    return local.timestamps.length > 0 ? local : serverHistory;
-  }
-  // 以服务端数据为准
-  saveLocalHistory(serverHistory);
-  return serverHistory;
-}
-
-// ===== 实时调用芒果TV API（通过CORS代理） =====
-async function fetchLiveFromAPI() {
-  const apiUrl = API_BASE + '?request_time=' + Date.now();
-  const proxyUrl = PROXY_URL + encodeURIComponent(apiUrl);
-  const resp = await fetch(proxyUrl);
-  if (!resp.ok) throw new Error('Proxy HTTP ' + resp.status);
-  const json = await resp.json();
-  if (json.errno !== 0) throw new Error('API error: ' + (json.errmsg || 'unknown'));
-  return json;
-}
-
-// 解析 API 原始数据
-function parseAPIData(json) {
-  const voteList = json.data ? json.data.vote_list : json.vote_list;
-  if (!voteList || !Array.isArray(voteList)) throw new Error('Invalid data structure');
-  const result = {};
-  voteList.forEach(item => {
-    let ha = 0, ga = 0;
-    (item.option_name || []).forEach(opt => {
-      if (opt.option_name === '夯爆了') ha = opt.option_vote_number;
-      else if (opt.option_name === '尬场了') ga = opt.option_vote_number;
-    });
-    result[item.vote_name] = {
-      vote_id: item.vote_id, song: item.song_name || '',
-      夯爆了: ha, 尬场了: ga
-    };
-  });
-  return result;
-}
-
-// 将实时数据合并到 history 中
-function appendLiveDataToHistory(history, liveData) {
-  const nowTs = Math.floor(Date.now() / 1000);
-
-  // 检查是否已有同一分钟的数据点
-  if (history.timestamps.length > 0) {
-    const lastTs = history.timestamps[history.timestamps.length - 1];
-    if (nowTs - lastTs < 50) {
-      // 更新时间戳为最新的数据，替换最后一个点
-      // 不新增点，替换最后一个
-    } else {
-      history.timestamps.push(nowTs);
-    }
-  } else {
-    history.timestamps.push(nowTs);
-  }
-
-  for (const [name, data] of Object.entries(liveData)) {
-    if (!history.contestants[name]) {
-      history.contestants[name] = {
-        vote_id: data.vote_id, song: data.song,
-        夯爆了: [], 尬场了: []
-      };
-    }
-    const c = history.contestants[name];
-    // 如果刚新增了时间戳，追加数据
-    if (c['夯爆了'].length < history.timestamps.length) {
-      c['夯爆了'].push(data['夯爆了']);
-      c['尬场了'].push(data['尬场了']);
-    } else {
-      // 更新最后一个数据点
-      c['夯爆了'][c['夯爆了'].length - 1] = data['夯爆了'];
-      c['尬场了'][c['尬场了'].length - 1] = data['尬场了'];
-    }
-  }
-
-  // 补齐
-  const tsLen = history.timestamps.length;
-  for (const c of Object.values(history.contestants)) {
-    while (c['夯爆了'].length < tsLen) c['夯爆了'].push(c['夯爆了'].length > 0 ? c['夯爆了'][c['夯爆了'].length-1] : 0);
-    while (c['尬场了'].length < tsLen) c['尬场了'].push(c['尬场了'].length > 0 ? c['尬场了'][c['尬场了'].length-1] : 0);
-  }
-
-  return history;
+// ===== toast =====
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast ' + (type||'');
+  t.classList.add('show');
+  clearTimeout(t._tid); t._tid = setTimeout(() => t.classList.remove('show'), 3000);
 }
 
 // ===== 数据处理 =====
@@ -221,10 +122,8 @@ function processData(history) {
   const contestants = history.contestants || {};
   const timeLabels = timestamps.map(ts => {
     const d = new Date(ts * 1000);
-    return (d.getMonth()+1).toString().padStart(2,'0')+'/'
-         + d.getDate().toString().padStart(2,'0')+' '
-         + d.getHours().toString().padStart(2,'0')+':'
-         + d.getMinutes().toString().padStart(2,'0');
+    return (d.getMonth()+1).toString().padStart(2,'0')+'/'+d.getDate().toString().padStart(2,'0')
+      +' '+d.getHours().toString().padStart(2,'0')+':'+d.getMinutes().toString().padStart(2,'0');
   });
   const latestVals = {};
   for (const [name, rec] of Object.entries(contestants)) {
@@ -246,24 +145,16 @@ function processData(history) {
 }
 
 // ===== UI 渲染 =====
-function showToast(msg, type) {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.className = 'toast ' + (type || '');
-  t.classList.add('show');
-  clearTimeout(t._tid); t._tid = setTimeout(() => t.classList.remove('show'), 2500);
-}
-
 function renderSummaryCards(sortedNames, dsT, dsI) {
   document.getElementById('summaryCards').innerHTML = sortedNames.map((name, i) => {
     const d = dsT[i], di = dsI[i];
     const lastVal = d.data.length ? d.data[d.data.length-1] : 0;
     const lastInc = di.data.length > 1 ? di.data[di.data.length-1] : null;
     const incStr = lastInc != null ? '+' + lastInc.toLocaleString() : '-';
-    const incCls = lastInc > 0 ? '' : 'zero';
     return `<div class="card" style="border-left:3px solid ${d.color}" onclick="focusContestant('${name.replace(/'/g,"\\'")}')">
       <div class="rank">#${i+1}</div><div class="name">${name}</div>
       <div class="votes">${lastVal.toLocaleString()}</div>
-      <div class="inc ${incCls}">${incStr}</div>
+      <div class="inc ${lastInc > 0 ? '' : 'zero'}">${incStr}</div>
       <div class="song">${d.song}</div></div>`;
   }).join('');
 }
@@ -276,19 +167,15 @@ function fillSelect(sortedNames) {
 
 function createTotalChart(timeLabels, dsT) {
   if (totalChart) totalChart.destroy();
-  const ctx = document.getElementById('totalChart').getContext('2d');
-  totalChart = new Chart(ctx, {
+  totalChart = new Chart(document.getElementById('totalChart').getContext('2d'), {
     type: 'line',
     data: { labels: timeLabels,
       datasets: dsT.map((d,i) => ({
-        label: d.name, data: d.data, borderColor: d.color,
-        backgroundColor: d.color+'20', borderWidth: i===0?3:1.5,
-        tension: 0.3, pointRadius: 1, pointHoverRadius: 5, fill: false
-      }))
-    },
+        label: d.name, data: d.data, borderColor: d.color, backgroundColor: d.color+'20',
+        borderWidth: i===0?3:1.5, tension: 0.3, pointRadius: 1, pointHoverRadius: 5, fill: false
+    }))},
     options: {
-      responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
+      responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { position: 'right', labels: { color:'#c0c0e0', font:{size:11}, boxWidth:15, padding:6 } },
         tooltip: { callbacks: { label: c => c.dataset.label + ': ' + c.parsed.y.toLocaleString() + ' 票' } }
@@ -303,18 +190,14 @@ function createTotalChart(timeLabels, dsT) {
 
 function createIncrementChart(timeLabels, dsI) {
   if (incrementChart) incrementChart.destroy();
-  const ctx = document.getElementById('incrementChart').getContext('2d');
-  incrementChart = new Chart(ctx, {
+  incrementChart = new Chart(document.getElementById('incrementChart').getContext('2d'), {
     type: 'bar',
     data: { labels: timeLabels,
       datasets: dsI.map((d,i) => ({
-        label: d.name, data: d.data,
-        backgroundColor: d.color+'80', borderColor: d.color, borderWidth: i===0?2.5:1.2
-      }))
-    },
+        label: d.name, data: d.data, backgroundColor: d.color+'80', borderColor: d.color, borderWidth: i===0?2.5:1.2
+    }))},
     options: {
-      responsive: true, maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
+      responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { position: 'right', labels: { color:'#c0c0e0', font:{size:11}, boxWidth:15, padding:6 } },
         tooltip: { callbacks: { label: c => c.dataset.label + ': +' + c.parsed.y.toLocaleString() + ' 票' } }
@@ -332,13 +215,10 @@ function createSingleCharts(name, timeLabels, dsT, dsI) {
   if (idx < 0) return;
   const d = dsT[idx], di = dsI[idx];
   if (singleChart) singleChart.destroy();
-  const ctx1 = document.getElementById('singleChart').getContext('2d');
-  singleChart = new Chart(ctx1, {
+  singleChart = new Chart(document.getElementById('singleChart').getContext('2d'), {
     type: 'line', data: { labels: timeLabels,
       datasets: [{ label: d.name+' 总票数', data: d.data, borderColor: d.color,
-        backgroundColor: d.color+'30', borderWidth:2.5, tension:0.3,
-        pointRadius:2, pointHoverRadius:6, fill:true }]
-    },
+        backgroundColor: d.color+'30', borderWidth:2.5, tension:0.3, pointRadius:2, pointHoverRadius:6, fill:true }] },
     options: {
       responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: c => '总票数: '+c.parsed.y.toLocaleString()+' 票' } } },
@@ -347,12 +227,9 @@ function createSingleCharts(name, timeLabels, dsT, dsI) {
     }
   });
   if (singleIncChart) singleIncChart.destroy();
-  const ctx2 = document.getElementById('singleIncChart').getContext('2d');
-  singleIncChart = new Chart(ctx2, {
+  singleIncChart = new Chart(document.getElementById('singleIncChart').getContext('2d'), {
     type: 'bar', data: { labels: timeLabels,
-      datasets: [{ label: d.name+' 增量', data: di.data,
-        backgroundColor: d.color+'80', borderColor: d.color, borderWidth:1 }]
-    },
+      datasets: [{ label: d.name+' 增量', data: di.data, backgroundColor: d.color+'80', borderColor: d.color, borderWidth:1 }] },
     options: {
       responsive:true, maintainAspectRatio:false,
       plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label: c => '增量: +'+c.parsed.y.toLocaleString()+' 票' } } },
@@ -382,7 +259,7 @@ function switchMode() {
     createTotalChart(timeLabels, dsT); createIncrementChart(timeLabels, dsI);
   } else if (mode === 'single') {
     document.getElementById('singleChartContainer').classList.remove('hidden');
-    createSingleCharts(selected === 'all' ? sortedNames[0] : selected, timeLabels, dsT, dsI);
+    createSingleCharts(selected==='all'?sortedNames[0]:selected, timeLabels, dsT, dsI);
   }
 }
 
@@ -399,123 +276,157 @@ function renderAll(history) {
   fillSelect(sortedNames);
   renderSummaryCards(sortedNames, dsT, dsI);
   switchMode();
-  const now = new Date().toLocaleString('zh-CN');
-  document.getElementById('lastUpdate').textContent = now;
-  document.getElementById('statusBadge').textContent =
-    '● 在线 (' + history.timestamps.length + ' 点)';
+  document.getElementById('lastUpdate').textContent = new Date().toLocaleString('zh-CN');
+  const badge = document.getElementById('statusBadge');
+  badge.className = 'status online';
+  badge.textContent = '● 在线 (' + history.timestamps.length + ' 点)';
 }
 
-// ===== 加载 data.json（同源，无需代理） =====
-async function loadFromJSON() {
+// ===== 加载 data.json（同源请求，无 CORS 问题） =====
+async function loadDataJSON() {
   const resp = await fetch('data.json?t=' + Date.now());
   if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  const history = await resp.json();
-  historyStore = mergeHistory(history);
-  renderAll(historyStore);
-  document.getElementById('statusBadge').className = 'status online';
+  return resp.json();
 }
 
-// ===== 手动刷新：实时调芒果TV API =====
-async function manualRefresh() {
-  const btn = document.getElementById('btnRefresh');
-  const badge = document.getElementById('statusBadge');
-  btn.disabled = true;
-  btn.textContent = '⏳ 正在调芒果TV接口...';
-  badge.className = 'status loading';
-  badge.textContent = '● 请求中';
-
+// ===== 触发 GitHub Action（服务端调芒果TV API） =====
+async function triggerWorkflow() {
+  // 调用 GitHub API 触发 workflow_dispatch
+  // 对于公开仓库，不需要 token 也能用（但有限流），如果 401 就跳过
+  const url = 'https://api.github.com/repos/iceicea/cf2026/actions/workflows/collect.yml/dispatches';
+  const body = JSON.stringify({ ref: 'main' });
   try {
-    // 实时调芒果 TV API
-    const apiJson = await fetchLiveFromAPI();
-    const liveData = parseAPIData(apiJson);
-
-    // 合并到本地历史
-    historyStore = historyStore || loadLocalHistory();
-    historyStore = appendLiveDataToHistory(historyStore, liveData);
-    saveLocalHistory(historyStore);
-
-    // 渲染
-    renderAll(historyStore);
-
-    badge.className = 'status live';
-    badge.textContent = '● 实时 (' + historyStore.timestamps.length + ' 点)';
-    document.getElementById('btnRefresh').textContent = '🔄 实时刷新（调芒果TV接口）';
-    showToast('✅ 已从芒果TV获取最新数据!', 'success');
-    resetCountdown();
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: { 'Accept': 'application/vnd.github+json' },
+      body
+    });
+    // 204 表示成功触发，401/403 表示需要认证（公开页面通常 401）
+    return resp.status === 204;
   } catch(e) {
-    console.error('实时调用失败:', e);
-    // 回退到 data.json
-    badge.className = 'status loading';
-    badge.textContent = '● 回退中';
-    showToast('⚠️ 实时接口不通，加载 data.json...');
-    try {
-      await loadFromJSON();
-      document.getElementById('btnRefresh').textContent = '🔄 实时刷新（调芒果TV接口）';
-      showToast('已加载 data.json（非实时，最多延迟5分钟）');
-    } catch(e2) {
-      badge.className = 'status error';
-      badge.textContent = '● 加载失败';
-      document.getElementById('btnRefresh').textContent = '🔄 重试';
-      showToast('❌ 所有数据源均失败');
-    }
-  } finally {
-    btn.disabled = false;
+    return false;
   }
 }
 
-// ===== 倒计时 =====
-function resetCountdown() {
-  countdown = 60;
-  updateCountdown();
+// ===== 轮询 data.json 直到出现新的数据点 =====
+async function pollForUpdate(oldPointCount, maxWait) {
+  const start = Date.now();
+  while (Date.now() - start < maxWait) {
+    await new Promise(r => setTimeout(r, 3000)); // 每3秒查一次
+    try {
+      const history = await loadDataJSON();
+      const newCount = (history.timestamps || []).length;
+      if (newCount > oldPointCount) {
+        return history; // 有新数据
+      }
+    } catch(e) {}
+  }
+  return null; // 超时
 }
 
-function updateCountdown() {
-  document.getElementById('countdown').textContent = '下次刷新: ' + countdown + '秒';
+// ===== 手动刷新：跟本地服务器逻辑一致 =====
+// 本地服务器: 1.调芒果TV API → 2.解析数据 → 3.追加到历史 → 4.返回完整历史
+// GitHub Pages: 1.触发Action(服务端调芒果TV API) → 2.轮询data.json → 3.返回最新历史
+async function manualRefresh() {
+  const btn = document.getElementById('btnRefresh');
+  const badge = document.getElementById('statusBadge');
+
+  btn.disabled = true;
+  btn.textContent = '⏳ 正在调芒果TV接口...';
+  badge.className = 'status pending';
+  badge.textContent = '● 请求中';
+
+  // 记录当前数据点数量
+  const oldCount = allData ? allData.timeLabels.length : 0;
+
+  // 第1步：触发 GitHub Action（服务端调芒果TV API）
+  const triggered = await triggerWorkflow();
+
+  if (triggered) {
+    btn.textContent = '⏳ 等待数据更新...';
+    showToast('📡 已触发服务端采集，等待芒果TV返回最新数据...');
+
+    // 第2步：轮询等待新数据（最多等35秒）
+    const newHistory = await pollForUpdate(oldCount, 35000);
+
+    if (newHistory && (newHistory.timestamps || []).length > oldCount) {
+      // 第3步：渲染新数据
+      renderAll(newHistory);
+      badge.className = 'status online';
+      badge.textContent = '● 在线 (' + newHistory.timestamps.length + ' 点)';
+      showToast('✅ 已获取芒果TV最新数据!', 'success');
+      resetCountdown();
+    } else {
+      // 超时：加载当前 data.json
+      try {
+        const history = await loadDataJSON();
+        renderAll(history);
+        showToast('⚠️ 等待超时，已加载当前最新数据');
+      } catch(e) {}
+    }
+  } else {
+    // 触发失败（通常因为公开页面无 GitHub token），直接加载 data.json
+    btn.textContent = '⏳ 加载数据中...';
+    try {
+      const history = await loadDataJSON();
+      renderAll(history);
+      badge.className = 'status online';
+      badge.textContent = '● 在线 (' + history.timestamps.length + ' 点)';
+      showToast('✅ 已加载最新数据（GitHub Action 每~60秒自动更新）');
+    } catch(e) {
+      badge.className = 'status error';
+      badge.textContent = '● 加载失败';
+      showToast('❌ 数据加载失败，请检查网络');
+    }
+  }
+
+  btn.disabled = false;
+  btn.textContent = '🔄 手动刷新（调芒果TV接口）';
+  resetCountdown();
+}
+
+// ===== 倒计时和自动刷新 =====
+function resetCountdown() { countdown = 60; updateCountdownDisplay(); }
+function updateCountdownDisplay() { document.getElementById('countdown').textContent = '下次自动刷新: ' + countdown + '秒'; }
+function tickCountdown() {
   countdown--;
   if (countdown < 0) countdown = 60;
+  updateCountdownDisplay();
 }
 
 function startAutoRefresh() {
   resetCountdown();
-  countdownTimer = setInterval(updateCountdown, 1000);
-  // 每60秒自动加载 data.json
+  countdownTimer = setInterval(tickCountdown, 1000);
   autoRefreshTimer = setInterval(async () => {
     try {
-      await loadFromJSON();
-      resetCountdown();
+      const history = await loadDataJSON();
+      if (history.timestamps.length > 0) {
+        renderAll(history);
+        resetCountdown();
+      }
     } catch(e) { console.error('自动刷新失败:', e); }
   }, 60000);
 }
 
 // ===== 初始化 =====
 document.addEventListener('DOMContentLoaded', async () => {
-  // 首次加载 data.json
   try {
-    await loadFromJSON();
+    const history = await loadDataJSON();
+    if (history.timestamps.length > 0) {
+      renderAll(history);
+      document.getElementById('statusBadge').className = 'status online';
+      document.getElementById('statusBadge').textContent = '● 在线 (' + history.timestamps.length + ' 点)';
+    } else {
+      document.getElementById('statusBadge').className = 'status loading';
+      document.getElementById('statusBadge').textContent = '● 等待首次数据...';
+      document.getElementById('lastUpdate').textContent = 'GitHub Action 正在首次采集...';
+    }
   } catch(e) {
-    console.error('初始加载失败:', e);
     document.getElementById('statusBadge').className = 'status error';
     document.getElementById('statusBadge').textContent = '● 加载失败';
     document.getElementById('lastUpdate').textContent = '请检查网络后刷新页面';
   }
-
-  // 启动自动刷新
   startAutoRefresh();
-
-  // 然后尝试实时数据（如果代理可达）
-  try {
-    const apiJson = await fetchLiveFromAPI();
-    const liveData = parseAPIData(apiJson);
-    historyStore = historyStore || loadLocalHistory();
-    historyStore = appendLiveDataToHistory(historyStore, liveData);
-    saveLocalHistory(historyStore);
-    renderAll(historyStore);
-    document.getElementById('statusBadge').className = 'status live';
-    document.getElementById('statusBadge').textContent = '● 实时 (' + historyStore.timestamps.length + ' 点)';
-  } catch(e) {
-    // 代理不可达，使用 data.json 数据（已加载）
-    console.log('实时代理不可达，使用 data.json');
-  }
 });
 </script>
 </body>
