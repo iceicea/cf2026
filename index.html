@@ -24,7 +24,6 @@ body{font-family:-apple-system,'Helvetica Neue','Microsoft Yahei',Arial,sans-ser
 .status.online{background:#00c85330;color:#00c853}
 .status.error{background:#ff444430;color:#ff4444}
 .status.loading{background:#ffa00030;color:#ffa000}
-.status.pending{background:#ff6b9d30;color:#ff6b9d}
 .countdown{color:#8890b0;font-size:.8em}
 .chart-container{margin:16px;background:#111130;border-radius:12px;padding:18px;border:1px solid #2a2a50}
 .chart-container h2{font-size:1.3em;margin-bottom:12px;color:#c0c0e0;display:flex;align-items:center;gap:8px}
@@ -53,11 +52,11 @@ body{font-family:-apple-system,'Helvetica Neue','Microsoft Yahei',Arial,sans-ser
 
 <div class="header">
   <h1>🌊 乘风2026 · 实时投票数据监控</h1>
-  <p class="subtitle">数据来源: 芒果TV API · 自动更新: ~60秒 · 最后更新: <span id="lastUpdate">加载中...</span></p>
+  <p class="subtitle">数据来源: 芒果TV API · 即时刷新 · 最后更新: <span id="lastUpdate">加载中...</span></p>
 </div>
 
 <div class="controls">
-  <button class="btn-refresh" onclick="manualRefresh()" id="btnRefresh">🔄 手动刷新（调芒果TV接口）</button>
+  <button class="btn-refresh" onclick="manualRefresh()" id="btnRefresh">🔄 手动刷新（即时）</button>
   <span class="status loading" id="statusBadge">● 加载中</span>
   <label>📊 视图:</label>
   <select id="chartMode" onchange="switchMode()">
@@ -93,13 +92,16 @@ body{font-family:-apple-system,'Helvetica Neue','Microsoft Yahei',Arial,sans-ser
 </div>
 
 <div class="footer">
-  <p>📡 点击「手动刷新」→ 触发 GitHub Action 服务端调芒果TV API → 轮询最新数据 | 🧑‍💻 <a href="https://github.com/iceicea/cf2026" target="_blank">GitHub 仓库</a></p>
+  <p>📡 后端服务部署在用户本机，通过隧道暴露公网 · 手动刷新即时刻芒果TV API | 🧑‍💻 <a href="https://github.com/iceicea/cf2026" target="_blank">GitHub 仓库</a></p>
   <p>总票数 = 夯爆了选项票数 | 增量 = 当前更新 - 上一次更新</p>
 </div>
 
 <div id="toast" class="toast"></div>
 
 <script>
+// ===== 后端服务地址（通过 localtunnel 隧道暴露的本地 Python 服务） =====
+const SERVER = 'https://cf2026monitor.loca.lt';
+
 const COLORS = ['#FF6384','#36A2EB','#FFCE56','#4BC0C0','#9966FF','#FF9F40','#C9CBCF','#7BC8A4',
   '#E8A87C','#FF6F61','#6B5B95','#88B04B','#F7CAC9','#92A8D1','#955251','#B565A7','#009B77',
   '#DD4124','#D65076','#45B8AC','#EFC050','#5B5EA6','#9B2335','#DFCFBE','#55B4B0'];
@@ -108,7 +110,6 @@ let allData = null, totalChart = null, incrementChart = null;
 let singleChart = null, singleIncChart = null;
 let autoRefreshTimer = null, countdownTimer = null, countdown = 60;
 
-// ===== toast =====
 function showToast(msg, type) {
   const t = document.getElementById('toast');
   t.textContent = msg; t.className = 'toast ' + (type||'');
@@ -116,7 +117,6 @@ function showToast(msg, type) {
   clearTimeout(t._tid); t._tid = setTimeout(() => t.classList.remove('show'), 3000);
 }
 
-// ===== 数据处理 =====
 function processData(history) {
   const timestamps = history.timestamps || [];
   const contestants = history.contestants || {};
@@ -144,7 +144,6 @@ function processData(history) {
   return { timeLabels, sortedNames, datasetsTotal: dsT, datasetsInc: dsI };
 }
 
-// ===== UI 渲染 =====
 function renderSummaryCards(sortedNames, dsT, dsI) {
   document.getElementById('summaryCards').innerHTML = sortedNames.map((name, i) => {
     const d = dsT[i], di = dsI[i];
@@ -277,157 +276,123 @@ function renderAll(history) {
   renderSummaryCards(sortedNames, dsT, dsI);
   switchMode();
   document.getElementById('lastUpdate').textContent = new Date().toLocaleString('zh-CN');
-  const badge = document.getElementById('statusBadge');
-  badge.className = 'status online';
-  badge.textContent = '● 在线 (' + history.timestamps.length + ' 点)';
+  document.getElementById('statusBadge').className = 'status online';
+  document.getElementById('statusBadge').textContent = '● 在线 (' + history.timestamps.length + ' 点)';
 }
 
-// ===== 加载 data.json（同源请求，无 CORS 问题） =====
-async function loadDataJSON() {
-  const resp = await fetch('data.json?t=' + Date.now());
-  if (!resp.ok) throw new Error('HTTP ' + resp.status);
-  return resp.json();
-}
-
-// ===== 触发 GitHub Action（服务端调芒果TV API） =====
-async function triggerWorkflow() {
-  // 调用 GitHub API 触发 workflow_dispatch
-  // 对于公开仓库，不需要 token 也能用（但有限流），如果 401 就跳过
-  const url = 'https://api.github.com/repos/iceicea/cf2026/actions/workflows/collect.yml/dispatches';
-  const body = JSON.stringify({ ref: 'main' });
-  try {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Accept': 'application/vnd.github+json' },
-      body
-    });
-    // 204 表示成功触发，401/403 表示需要认证（公开页面通常 401）
-    return resp.status === 204;
-  } catch(e) {
-    return false;
-  }
-}
-
-// ===== 轮询 data.json 直到出现新的数据点 =====
-async function pollForUpdate(oldPointCount, maxWait) {
-  const start = Date.now();
-  while (Date.now() - start < maxWait) {
-    await new Promise(r => setTimeout(r, 3000)); // 每3秒查一次
-    try {
-      const history = await loadDataJSON();
-      const newCount = (history.timestamps || []).length;
-      if (newCount > oldPointCount) {
-        return history; // 有新数据
-      }
-    } catch(e) {}
-  }
-  return null; // 超时
-}
-
-// ===== 手动刷新：跟本地服务器逻辑一致 =====
-// 本地服务器: 1.调芒果TV API → 2.解析数据 → 3.追加到历史 → 4.返回完整历史
-// GitHub Pages: 1.触发Action(服务端调芒果TV API) → 2.轮询data.json → 3.返回最新历史
+// ===== 手动刷新：直接调后端服务（后端调芒果TV API） =====
 async function manualRefresh() {
   const btn = document.getElementById('btnRefresh');
   const badge = document.getElementById('statusBadge');
-
   btn.disabled = true;
   btn.textContent = '⏳ 正在调芒果TV接口...';
-  badge.className = 'status pending';
+  badge.className = 'status loading';
   badge.textContent = '● 请求中';
 
-  // 记录当前数据点数量
-  const oldCount = allData ? allData.timeLabels.length : 0;
-
-  // 第1步：触发 GitHub Action（服务端调芒果TV API）
-  const triggered = await triggerWorkflow();
-
-  if (triggered) {
-    btn.textContent = '⏳ 等待数据更新...';
-    showToast('📡 已触发服务端采集，等待芒果TV返回最新数据...');
-
-    // 第2步：轮询等待新数据（最多等35秒）
-    const newHistory = await pollForUpdate(oldCount, 35000);
-
-    if (newHistory && (newHistory.timestamps || []).length > oldCount) {
-      // 第3步：渲染新数据
-      renderAll(newHistory);
-      badge.className = 'status online';
-      badge.textContent = '● 在线 (' + newHistory.timestamps.length + ' 点)';
-      showToast('✅ 已获取芒果TV最新数据!', 'success');
-      resetCountdown();
-    } else {
-      // 超时：加载当前 data.json
-      try {
-        const history = await loadDataJSON();
-        renderAll(history);
-        showToast('⚠️ 等待超时，已加载当前最新数据');
-      } catch(e) {}
-    }
-  } else {
-    // 触发失败（通常因为公开页面无 GitHub token），直接加载 data.json
-    btn.textContent = '⏳ 加载数据中...';
-    try {
-      const history = await loadDataJSON();
-      renderAll(history);
-      badge.className = 'status online';
-      badge.textContent = '● 在线 (' + history.timestamps.length + ' 点)';
-      showToast('✅ 已加载最新数据（GitHub Action 每~60秒自动更新）');
-    } catch(e) {
-      badge.className = 'status error';
-      badge.textContent = '● 加载失败';
-      showToast('❌ 数据加载失败，请检查网络');
-    }
+  try {
+    // 调用后端 /api/refresh（后端服务端调芒果TV API，无CORS限制）
+    const resp = await fetch(SERVER + '/api/refresh');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const history = await resp.json();
+    renderAll(history);
+    badge.className = 'status online';
+    badge.textContent = '● 在线 (' + history.timestamps.length + ' 点)';
+    showToast('✅ 已获取芒果TV最新数据!', 'success');
+    resetCountdown();
+  } catch(e) {
+    console.error('实时刷新失败:', e);
+    badge.className = 'status error';
+    badge.textContent = '● 后端离线';
+    showToast('❌ 后端服务不可达，请确认本机 Python 服务和隧道是否在运行');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '🔄 手动刷新（即时）';
   }
-
-  btn.disabled = false;
-  btn.textContent = '🔄 手动刷新（调芒果TV接口）';
-  resetCountdown();
 }
 
-// ===== 倒计时和自动刷新 =====
-function resetCountdown() { countdown = 60; updateCountdownDisplay(); }
-function updateCountdownDisplay() { document.getElementById('countdown').textContent = '下次自动刷新: ' + countdown + '秒'; }
+// ===== 自动刷新（从后端拉最新数据） =====
+async function autoFetch() {
+  try {
+    const resp = await fetch(SERVER + '/api/data');
+    if (resp.ok) {
+      const history = await resp.json();
+      if (history.timestamps.length > 0) {
+        renderAll(history);
+        resetCountdown();
+      }
+    }
+  } catch(e) {
+    console.error('自动刷新失败:', e);
+  }
+}
+
+function resetCountdown() { countdown = 60; updateCountdown(); }
+function updateCountdown() { document.getElementById('countdown').textContent = '下次自动刷新: ' + countdown + '秒'; }
 function tickCountdown() {
   countdown--;
   if (countdown < 0) countdown = 60;
-  updateCountdownDisplay();
+  updateCountdown();
 }
 
 function startAutoRefresh() {
   resetCountdown();
   countdownTimer = setInterval(tickCountdown, 1000);
-  autoRefreshTimer = setInterval(async () => {
-    try {
-      const history = await loadDataJSON();
-      if (history.timestamps.length > 0) {
-        renderAll(history);
-        resetCountdown();
-      }
-    } catch(e) { console.error('自动刷新失败:', e); }
-  }, 60000);
+  autoRefreshTimer = setInterval(autoFetch, 60000);
 }
 
 // ===== 初始化 =====
 document.addEventListener('DOMContentLoaded', async () => {
   try {
-    const history = await loadDataJSON();
-    if (history.timestamps.length > 0) {
-      renderAll(history);
-      document.getElementById('statusBadge').className = 'status online';
-      document.getElementById('statusBadge').textContent = '● 在线 (' + history.timestamps.length + ' 点)';
-    } else {
-      document.getElementById('statusBadge').className = 'status loading';
-      document.getElementById('statusBadge').textContent = '● 等待首次数据...';
-      document.getElementById('lastUpdate').textContent = 'GitHub Action 正在首次采集...';
+    const resp = await fetch(SERVER + '/api/data');
+    if (resp.ok) {
+      const history = await resp.json();
+      if (history.timestamps.length > 0) {
+        renderAll(history);
+        document.getElementById('statusBadge').className = 'status online';
+        document.getElementById('statusBadge').textContent = '● 在线 (' + history.timestamps.length + ' 点)';
+        startAutoRefresh();
+        return;
+      }
     }
-  } catch(e) {
-    document.getElementById('statusBadge').className = 'status error';
-    document.getElementById('statusBadge').textContent = '● 加载失败';
-    document.getElementById('lastUpdate').textContent = '请检查网络后刷新页面';
-  }
-  startAutoRefresh();
+  } catch(e) { console.error('初始加载:', e); }
+
+  // 后端不可达，尝试 data.json 作为后备
+  document.getElementById('statusBadge').className = 'status error';
+  document.getElementById('statusBadge').textContent = '● 后端离线';
+  document.getElementById('lastUpdate').textContent = '后端不可达，尝试加载静态数据...';
+
+  try {
+    const resp = await fetch('data.json?t=' + Date.now());
+    if (resp.ok) {
+      const history = await resp.json();
+      if (history.timestamps.length > 0) {
+        renderAll(history);
+        document.getElementById('statusBadge').textContent = '● 静态数据 (' + history.timestamps.length + ' 点)';
+        showToast('⚠️ 后端离线，显示的是静态备份数据');
+        startAutoRefreshUsingJSON();
+        return;
+      }
+    }
+  } catch(e) {}
+
+  document.getElementById('statusBadge').className = 'status error';
+  document.getElementById('statusBadge').textContent = '● 加载失败';
 });
+
+// 后端离线时的后备自动刷新（读 data.json）
+function startAutoRefreshUsingJSON() {
+  resetCountdown();
+  countdownTimer = setInterval(tickCountdown, 1000);
+  autoRefreshTimer = setInterval(async () => {
+    try {
+      const resp = await fetch('data.json?t=' + Date.now());
+      if (resp.ok) {
+        const history = await resp.json();
+        if (history.timestamps.length > 0) renderAll(history);
+      }
+    } catch(e) {}
+  }, 60000);
+}
 </script>
 </body>
 </html>
